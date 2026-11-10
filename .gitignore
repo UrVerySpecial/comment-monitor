@@ -1,0 +1,20 @@
+# 비밀 값과 개인 설정
+.env
+config.yaml
+
+# 원본 DB와 전달용 출력물
+data/
+output/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
