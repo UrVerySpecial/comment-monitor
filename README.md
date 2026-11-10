@@ -137,7 +137,7 @@
 필요한 것: Python 3.11 이상, [uv](https://docs.astral.sh/uv/), YouTube Data API 키, Anthropic API 키.
 
 ```bash
-git clone <이 저장소 주소> comment-monitor
+git clone https://github.com/UrVerySpecial/comment-monitor.git comment-monitor
 cd comment-monitor
 uv sync                                # 의존성 설치
 uv run playwright install chromium     # 캡처용 브라우저 (한 번만)
