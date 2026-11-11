@@ -175,6 +175,9 @@ class FakeYouTube:
             if token:
                 data["nextPageToken"] = token
             return data
+        # 실제 API는 id 조회에 쪽 나눔 매개변수가 붙으면 요청을 거절한다.
+        if "maxResults" in params or "pageToken" in params:
+            raise _error(400, "unexpectedParameter")
         items = []
         for comment_id in params["id"].split(","):
             try:
