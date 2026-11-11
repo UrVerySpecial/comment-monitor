@@ -47,7 +47,7 @@ def test_all_comments_are_exported_with_blank_ai_columns(db, tmp_path):
     assert first["영상 제목"].value == "시험 영상"
     assert reply["원댓글"].value == "첫 댓글" and first["원댓글"].value is None
     assert all(row[header].value is None for row in rows for header in AI_HEADERS)
-    assert sheet.freeze_panes == "B2" and sheet.auto_filter.ref == "A1:V3"
+    assert sheet.freeze_panes == "B2" and sheet.auto_filter.ref == "A1:W3"
 
 
 def test_ai_columns_fill_in_once_a_classification_exists(db, tmp_path):
@@ -101,7 +101,7 @@ def test_open_file_falls_back_to_a_new_name(db, tmp_path, monkeypatch):
     assert result.path.is_file() and not path.exists()
 
 
-# ---- 부정 댓글, 작성자 랭킹, 통계 요약 ----
+# ---- 부정 댓글, 작성자 랭킹, 통계 요약, 영상 목록 ----
 
 
 def table(path, title):
@@ -137,8 +137,10 @@ def test_default_tabs_and_negative_sheet(cfg, db, tmp_path):
     mark_negative(db, "c2", severity=4)
     path, _, result = export_all(cfg, db, tmp_path)
 
-    assert load_workbook(path).sheetnames == ["부정 댓글", "작성자 랭킹", "통계 요약"]
-    assert result.units == {"부정 댓글": "건", "작성자 랭킹": "명", "통계 요약": "개 영상"}
+    assert load_workbook(path).sheetnames == ["부정 댓글", "작성자 랭킹", "통계 요약", "영상 목록"]
+    assert result.units == {
+        "부정 댓글": "건", "작성자 랭킹": "명", "통계 요약": "개 영상", "영상 목록": "개 영상",
+    }
     sheet, headers, rows = table(path, "부정 댓글")
     assert headers[-4:] == ["캡처", "캡처 해시 (SHA-256)", "검토 상태", "비고"]
     assert [row["댓글 ID"] for row in rows] == ["c2"]
@@ -204,7 +206,7 @@ def test_ranking_and_stats_tabs(cfg, db, tmp_path):
     mark_negative(db, "c2", severity=2, target="불명")
     mark_negative(db, "c3", severity=5, target="타인")
     path, _, result = export_all(cfg, db, tmp_path)
-    assert result.rows == {"부정 댓글": 3, "작성자 랭킹": 1, "통계 요약": 1}
+    assert result.rows == {"부정 댓글": 3, "작성자 랭킹": 1, "통계 요약": 1, "영상 목록": 1}
 
     _, headers, rows = table(path, "작성자 랭킹")
     assert "홍길동 점수" in headers and "불명 점수" in headers
@@ -234,3 +236,34 @@ def test_judgments_for_removed_targets_get_their_own_column(cfg, db, tmp_path):
     _, headers, rows = table(path, "작성자 랭킹")
     assert "기타(이전 대상) 점수 ※재분류 필요" in headers
     assert rows[0]["주 대상"] == "기타(이전 대상)"
+
+
+def test_video_list_is_keyed_by_the_video_id_on_comment_rows(cfg, db, tmp_path):
+    db.conn.execute(
+        "INSERT INTO videos (platform, video_id, title, source, source_detail, comment_count, "
+        "collect_status, first_seen_at) VALUES ('youtube', 'other000001', '다른 영상', 'search', "
+        "'홍길동', 90, 'full', '2026-11-01T00:00:00Z'), ('youtube', 'never000001', '안 모은 영상', "
+        "'search', '홍길동', 500, 'none', '2026-11-01T00:00:00Z')"
+    )
+    add(db, "c1", "욕")
+    add(db, "c2", "칭찬")
+    add(db, "c3", "아직 분류 안 한 댓글")
+    mark_negative(db, "c1")
+    db.conn.execute(
+        "INSERT INTO classifications (platform, comment_id, stage, sentiment, target, legal_type, "
+        "severity, reason, model, prompt_version, classified_at) VALUES ('youtube', 'c2', 'final', "
+        "'긍정', '홍길동', '해당 없음', 0, '칭찬', 'm', 'v1', '2026-11-02T00:00:00Z')"
+    )
+    path, _, result = export_all(cfg, db, tmp_path)
+
+    _, _, comments = table(path, "부정 댓글")
+    sheet, headers, videos = table(path, "영상 목록")
+    assert result.rows["영상 목록"] == 2 and headers[:3] == ["영상 ID", "영상 주소", "영상 제목"]
+    assert [row["영상 ID"] for row in videos] == ["other000001", VIDEO_ID]   # 댓글 많은 순
+    assert comments[0]["영상 ID"] == VIDEO_ID
+    mine = videos[1]
+    assert (mine["영상 제목"], mine["발견 경로"]) == ("시험 영상", "지정")
+    assert (mine["수집된 댓글 수"], mine["긍정 댓글 수"], mine["부정 댓글 수"]) == (3, 1, 1)
+    assert mine["영상 주소"] == f"https://www.youtube.com/watch?v={VIDEO_ID}"
+    assert (videos[0]["발견 경로"], videos[0]["수집 상태"]) == ("검색: 홍길동", "전체")
+    assert sheet.auto_filter.ref == "A1:L3"

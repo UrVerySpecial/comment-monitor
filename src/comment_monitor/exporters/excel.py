@@ -1,6 +1,6 @@
 """엑셀 출력.
 
-파일 하나에 탭 셋을 만든다: 부정 댓글, 작성자 랭킹, 통계 요약. 설정에서 켜면 전체 댓글 탭도 붙인다.
+파일 하나에 탭 넷을 만든다: 부정 댓글, 작성자 랭킹, 통계 요약, 영상 목록. 설정에서 켜면 전체 댓글 탭도 붙인다.
 파일은 실행할 때마다 DB 기준으로 통째로 다시 만든다. 사람이 엑셀에 적은 검토 상태와 비고는
 다시 만들기 전에 import_reviews()로 DB에 옮겨 두었다가 새 파일에 다시 채운다.
 
@@ -27,6 +27,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from .. import ranking
 from ..collectors.youtube import PLATFORM, comment_url, video_url
 from ..config import Config
+from ..planner import source_label
 from ..db import (
     COLLECT_FULL,
     COLLECT_PARTIAL,
@@ -44,6 +45,7 @@ MAX_CELL_CHARS = 32_767
 NEGATIVE_TITLE = "부정 댓글"
 RANKING_TITLE = "작성자 랭킹"
 STATS_TITLE = "통계 요약"
+VIDEOS_TITLE = "영상 목록"
 REVIEW_HEADER, NOTE_HEADER = "검토 상태", "비고"
 
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -156,6 +158,7 @@ COMMENT_COLUMNS: tuple[Column, ...] = (
     Column("수정 여부", "시각", 16, _edited),
     Column("조회 불가 감지일시 (KST)", "시각", 20, _kst("missing_at")),
     Column("댓글 주소", "위치", 40, lambda row: comment_url(row["video_id"], row["comment_id"])),
+    Column("영상 ID", "위치", 14, _field("video_id")),  # 영상 목록 탭과 잇는 키
     Column("영상 제목", "위치", 40, _field("video_title")),
     Column("영상 주소", "위치", 40, lambda row: video_url(row["video_id"])),
     Column("영상 채널명", "위치", 20, _field("video_channel")),
@@ -246,6 +249,35 @@ def ranking_sheet(target_names: Sequence[str], *, with_past: bool) -> SheetSpec:
 
 
 _COLLECT_LABELS = {COLLECT_FULL: "전체", COLLECT_PARTIAL: "부분"}
+
+
+def _found_by(row: Any) -> str:
+    label = source_label(row["source"])
+    return f"{label}: {row['source_detail']}" if row["source_detail"] else label
+
+
+# 댓글 탭의 "영상 ID"로 찾아볼 수 있는 영상 목록. 댓글을 한 건이라도 모은 영상만 올린다.
+VIDEO_LIST = SheetSpec(
+    title=VIDEOS_TITLE,
+    columns=(
+        Column("영상 ID", "식별", 14, _field("video_id")),
+        Column("영상 주소", "위치", 44, lambda row: video_url(row["video_id"])),
+        Column("영상 제목", "위치", 50, _field("title")),
+        Column("영상 채널명", "위치", 22, _field("channel_title")),
+        Column("전체 댓글 수", "건수", 11, _field("comment_count")),
+        Column("수집된 댓글 수", "건수", 11, _field("collected")),
+        # 긍정과 부정은 수집해서 분류까지 마친 댓글만 센 값이다. 영상 전체의 수가 아니다.
+        Column("긍정 댓글 수", "건수", 11, _field("positives")),
+        Column("부정 댓글 수", "건수", 11, _field("negatives")),
+        Column("수집 상태", "건수", 10,
+               lambda row: _COLLECT_LABELS.get(row["collect_status"], "미수집")),
+        Column("발견 경로", "위치", 24, _found_by),
+        Column("게시일시 (KST)", "시각", 20, _kst("published_at")),
+        Column("최근 수집일시 (KST)", "시각", 20, _kst("last_collected_at")),
+    ),
+    rows=lambda db: db.video_rows(),
+    unit="개 영상",
+)
 
 
 @dataclass(frozen=True)
@@ -339,6 +371,7 @@ def build_sheets(config: Config, db: Database) -> tuple[SheetSpec | GridSpec, ..
     ))
     sheets: list[SheetSpec | GridSpec] = [
         NEGATIVE_COMMENTS, ranking_sheet(names, with_past=with_past), stats_sheet(names),
+        VIDEO_LIST,
     ]
     if config.export.include_all_comments:
         sheets.append(ALL_COMMENTS)

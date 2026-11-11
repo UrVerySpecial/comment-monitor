@@ -119,7 +119,7 @@ def test_collect_then_status_and_export(site, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "부정 댓글: 0건" in out and "작성자 랭킹: 0명" in out and "통계 요약: 2개 영상" in out
     book = load_workbook(tmp_path / "output" / "댓글증거.xlsx")
-    assert book.sheetnames == ["부정 댓글", "작성자 랭킹", "통계 요약"]
+    assert book.sheetnames == ["부정 댓글", "작성자 랭킹", "통계 요약", "영상 목록"]
 
     with open(site, "a", encoding="utf-8") as handle:
         handle.write("export:\n  include_all_comments: true\n")

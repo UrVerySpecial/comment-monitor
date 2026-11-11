@@ -26,7 +26,7 @@ youtube:
   daily_quota_budget: 8000               # 이 값을 넘기 전에 수집을 멈춤
 
 limits:
-  max_videos_per_run: 50
+  max_videos_per_run: 50                 # 댓글이 많은 영상부터 N개만 처리 (--max-videos로 덮어씀)
   max_comments_per_video: 20000          # 넘으면 최신순 부분 수집
   full_rescan_max_comments: 5000         # 이하인 영상만 매번 전체 재확인
   max_classify_per_run: 5000

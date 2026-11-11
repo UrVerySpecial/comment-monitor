@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--max-comments", type=_positive_int, metavar="N", help="영상당 댓글 상한"
     )
+    common.add_argument(
+        "--max-videos", type=_positive_int, metavar="N",
+        help="대상 영상 수 상한. 댓글이 많은 영상부터 N개만 처리 (기본값: 설정의 "
+             "limits.max_videos_per_run, 50)",
+    )
     scan = common.add_mutually_exclusive_group()
     scan.add_argument("--full", action="store_true", help="큰 영상도 전체 재확인")
     scan.add_argument("--quick", action="store_true", help="모든 영상을 새 댓글만 확인")
@@ -234,8 +239,8 @@ def _print_plan(plan: Plan, config: Config, *, two_pass: bool = False) -> None:
         )
     if plan.deferred:
         leftovers.append(
-            f"실행당 영상 수 상한({limits.max_videos_per_run}개)으로 다음 실행에 넘기는 영상: "
-            f"{len(plan.deferred)}개"
+            f"영상 수 상한({limits.max_videos_per_run}개, 댓글 많은 순)에 들지 못해 빠지는 영상: "
+            f"{len(plan.deferred)}개 (--max-videos로 늘릴 수 있습니다)"
         )
     if estimate.over_cap_comments:
         leftovers.append(
@@ -305,7 +310,10 @@ def _print_summary(summary: CollectionSummary, plan: Plan, quota_used: int) -> N
         print(f"수집을 멈췄습니다: {summary.stopped_reason}")
         print(f"- 처리하지 못한 영상 {len(summary.not_reached)}개는 다음 실행이 이어서 합니다.")
     if plan.deferred:
-        print(f"- 영상 수 상한으로 넘긴 영상 {len(plan.deferred)}개는 다음 실행에서 먼저 처리합니다.")
+        print(
+            f"- 댓글 수 순위가 영상 수 상한 밖인 영상 {len(plan.deferred)}개는 처리하지 않았습니다. "
+            "--max-videos로 상한을 늘릴 수 있습니다."
+        )
 
 
 def _collect(config: Config, db: Database, args: argparse.Namespace, *, plan_only: bool) -> int:
@@ -941,6 +949,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             no_search=args.no_search,
             search_top=args.search_top,
             max_comments=args.max_comments,
+            max_videos=args.max_videos,
         )
         with Database(config.db_path) as db:
             code = _dispatch(config, db, args)

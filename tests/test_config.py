@@ -92,6 +92,13 @@ def test_no_search_and_max_comments_overrides(write_config):
     assert overridden.limits.max_comments_per_video == 500
 
 
+def test_max_videos_defaults_to_50_and_can_be_overridden(write_config):
+    config = load_config(write_config(""))
+    assert config.limits.max_videos_per_run == 50
+    assert apply_overrides(config).limits.max_videos_per_run == 50
+    assert apply_overrides(config, max_videos=10).limits.max_videos_per_run == 10
+
+
 @pytest.mark.parametrize(
     "value",
     [

@@ -420,6 +420,7 @@ def apply_overrides(
     no_search: bool = False,
     search_top: int | None = None,
     max_comments: int | None = None,
+    max_videos: int | None = None,
 ) -> Config:
     """명령줄 옵션을 이번 실행에 한해 설정 위에 덮어쓴다.
 
@@ -444,6 +445,8 @@ def apply_overrides(
     limits = config.limits
     if max_comments is not None:
         limits = replace(limits, max_comments_per_video=max_comments)
+    if max_videos is not None:
+        limits = replace(limits, max_videos_per_run=max_videos)
     return replace(config, youtube=youtube, limits=limits)
 
 

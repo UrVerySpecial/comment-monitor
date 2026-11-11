@@ -690,6 +690,24 @@ class Database:
     def all_videos(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM videos ORDER BY first_seen_at, video_id").fetchall()
 
+    def video_rows(self) -> list[sqlite3.Row]:
+        """엑셀 영상 목록용. 댓글을 모은 영상마다 수집된 댓글 수와 긍정·부정 댓글 수를 붙여 댓글 많은 순으로 준다."""
+        return self.conn.execute(
+            f"""
+            SELECT v.*, COUNT(c.comment_id) AS collected,
+                   COALESCE(SUM(k.sentiment = '긍정'), 0) AS positives,
+                   COALESCE(SUM(k.sentiment = '부정'), 0) AS negatives
+            FROM videos v
+            LEFT JOIN comments c ON c.platform = v.platform AND c.video_id = v.video_id
+            LEFT JOIN classifications k ON k.platform = c.platform
+                AND k.comment_id = c.comment_id AND k.is_current = 1
+                AND k.stage = '{STAGE_FINAL}' AND k.status = '{STATUS_OK}'
+            GROUP BY v.platform, v.video_id
+            HAVING collected > 0 OR v.collect_status != '{COLLECT_NONE}'
+            ORDER BY COALESCE(v.comment_count, 0) DESC, collected DESC, v.video_id
+            """
+        ).fetchall()
+
     # ---- 분류 ----
 
     def _classify_where(
