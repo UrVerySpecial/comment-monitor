@@ -1,13 +1,13 @@
-from comment_monitor.ranking import PAST_TARGET, build_stats, rank_authors
+from comment_monitor.ranking import PAST_TARGET, build_stats, comments_by_rank, rank_authors
 
 NAMES = ("김가수", "밴드")
 
 
 def row(author="UCa", *, target="김가수", severity=3, sentiment="부정", legal_type="모욕",
         review=None, video="v1", published="2026-11-01T00:00:00Z", name=None, missing=None,
-        captured=0, failed=0):
+        captured=0, failed=0, comment="c", no=0):
     return {
-        "platform": "youtube", "comment_id": "c", "video_id": video,
+        "evidence_no": no, "platform": "youtube", "comment_id": comment, "video_id": video,
         "author_name": name or f"이름-{author}", "author_channel_id": author,
         "author_profile_url": f"http://example.com/{author}" if author else None,
         "published_at": published, "first_collected_at": "2026-11-05T00:00:00Z",
@@ -109,3 +109,30 @@ def test_stats_count_by_video_and_target_regardless_of_review():
 
     stale = build_stats([row(target="예전 이름")], videos, NAMES)
     assert stale.targets[-1].target == PAST_TARGET and stale.targets[-1].negative == 1
+
+
+def test_comments_follow_the_ranking_then_severity():
+    rows = [
+        row("UCa", severity=1, comment="a1", no=1),
+        row("UCb", severity=5, comment="b1", no=2),
+        row("UCa", severity=3, comment="a2", no=3),
+        row("UCa", severity=3, comment="a3", no=4),
+        row("UCa", severity=5, target="타인", comment="a-other", no=5),
+        row("UCb", severity=4, review="제외", comment="b-excluded", no=6),
+        row("UCc", sentiment="긍정", comment="c1", no=7),
+    ]
+    ranked = rank_authors(rows, NAMES)
+    listed = comments_by_rank(rows, ranked)
+    assert [(author.rank, item["comment_id"]) for author, item in listed] == [
+        (1, "a2"), (1, "a3"), (1, "a1"), (2, "b1")]
+    # 작성자마다 나오는 건수는 랭킹의 부정 댓글 수와 같다.
+    assert [a.count for a in ranked] == [3, 1]
+
+
+def test_captured_comments_are_counted_per_author():
+    rows = [
+        row("UCa", captured=1), row("UCa", captured=1), row("UCa"),
+        row("UCa", captured=1, review="제외"),
+        row("UCb"),
+    ]
+    assert [(a.channel_id, a.captured) for a in rank_authors(rows, NAMES)] == [("UCa", 2), ("UCb", 0)]

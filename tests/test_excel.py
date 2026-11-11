@@ -11,12 +11,12 @@ from .helpers import mark_negative
 AI_HEADERS = ["감성", "대상", "법적 유형", "심각도", "근거"]
 
 
-def add(db, comment_id, text, parent_id=None):
+def add(db, comment_id, text, parent_id=None, author="UCabc"):
     db.upsert_comment(
         CommentData(
             platform="youtube", comment_id=comment_id, video_id=VIDEO_ID, text=text,
-            parent_id=parent_id, author_name="작성자", author_channel_id="UCabc",
-            author_profile_url="http://www.youtube.com/channel/UCabc", like_count=3,
+            parent_id=parent_id, author_name="작성자", author_channel_id=author,
+            author_profile_url=f"http://www.youtube.com/channel/{author}", like_count=3,
             published_at="2026-11-10T11:33:00Z", updated_at="2026-11-10T11:33:00Z",
         ),
         now="2026-11-01T12:00:00Z",
@@ -137,9 +137,11 @@ def test_default_tabs_and_negative_sheet(cfg, db, tmp_path):
     mark_negative(db, "c2", severity=4)
     path, _, result = export_all(cfg, db, tmp_path)
 
-    assert load_workbook(path).sheetnames == ["부정 댓글", "작성자 랭킹", "통계 요약", "영상 목록"]
+    assert load_workbook(path).sheetnames == [
+        "부정 댓글", "작성자 랭킹", "작성자별 댓글", "통계 요약", "영상 목록"]
     assert result.units == {
-        "부정 댓글": "건", "작성자 랭킹": "명", "통계 요약": "개 영상", "영상 목록": "개 영상",
+        "부정 댓글": "건", "작성자 랭킹": "명", "작성자별 댓글": "건", "통계 요약": "개 영상",
+        "영상 목록": "개 영상",
     }
     sheet, headers, rows = table(path, "부정 댓글")
     assert headers[-4:] == ["캡처", "캡처 해시 (SHA-256)", "검토 상태", "비고"]
@@ -206,7 +208,8 @@ def test_ranking_and_stats_tabs(cfg, db, tmp_path):
     mark_negative(db, "c2", severity=2, target="불명")
     mark_negative(db, "c3", severity=5, target="타인")
     path, _, result = export_all(cfg, db, tmp_path)
-    assert result.rows == {"부정 댓글": 3, "작성자 랭킹": 1, "통계 요약": 1, "영상 목록": 1}
+    assert result.rows == {
+        "부정 댓글": 3, "작성자 랭킹": 1, "작성자별 댓글": 2, "통계 요약": 1, "영상 목록": 1}
 
     _, headers, rows = table(path, "작성자 랭킹")
     assert "홍길동 점수" in headers and "불명 점수" in headers
@@ -267,3 +270,39 @@ def test_video_list_is_keyed_by_the_video_id_on_comment_rows(cfg, db, tmp_path):
     assert mine["영상 주소"] == f"https://www.youtube.com/watch?v={VIDEO_ID}"
     assert (videos[0]["발견 경로"], videos[0]["수집 상태"]) == ("검색: 홍길동", "전체")
     assert sheet.auto_filter.ref == "A1:L3"
+
+
+def test_ranking_rows_jump_to_the_authors_comments(cfg, db, tmp_path):
+    add(db, "a1", "약한 욕", author="UCa")
+    add(db, "b1", "심한 욕", author="UCb")
+    add(db, "a2", "남 얘기", author="UCa")
+    add(db, "b2", "욕 하나 더", author="UCb")
+    add(db, "b3", "가장 심한 욕", author="UCb")
+    add(db, "c1", "제외할 욕", author="UCc")
+    mark_negative(db, "a1", severity=2)
+    mark_negative(db, "b1", severity=3)
+    mark_negative(db, "a2", severity=5, target="타인")
+    mark_negative(db, "b2", severity=3)
+    mark_negative(db, "b3", severity=5)
+    mark_negative(db, "c1", severity=5)
+    db.save_reviews([("youtube", "c1", "제외", None)])
+    db.save_capture("youtube", "b3", captured_at="2026-11-03T00:00:00Z",
+                    composite_path="captures/000005_b3.png", composite_sha256="abc")
+    path, _, result = export_all(cfg, db, tmp_path)
+
+    sheet, headers, rows = table(path, "작성자별 댓글")
+    assert headers[0] == "순위" and headers[-2:] == ["캡처", "캡처 해시 (SHA-256)"]
+    # 순위순, 같은 작성자 안에서는 심각한 댓글부터, 같으면 증거 번호순. 랭킹이 세지 않는 댓글은 없다.
+    assert [(row["순위"], row["댓글 ID"]) for row in rows] == [
+        (1, "b3"), (1, "b1"), (1, "b2"), (2, "a1")]
+    assert rows[0]["캡처"] == '=HYPERLINK("captures/000005_b3.png","열기")'
+    assert result.rows["작성자별 댓글"] == 4 and sheet.auto_filter.ref == "A1:Z5"
+
+    _, headers, ranking = table(path, "작성자 랭킹")
+    assert headers[:2] == ["순위", "댓글 보기"]
+    assert [row["작성자 채널 ID"] for row in ranking] == ["UCb", "UCa"]
+    assert ranking[0]["댓글 보기"] == """=HYPERLINK("#'작성자별 댓글'!A2","보기")"""
+    assert ranking[1]["댓글 보기"] == """=HYPERLINK("#'작성자별 댓글'!A5","보기")"""
+    # 캡처가 있는 작성자만 증거 폴더로 이어진다.
+    assert ranking[0]["증거 폴더"] == '=HYPERLINK("작성자별/001_작성자_UCb","열기")'
+    assert ranking[1]["증거 폴더"] is None

@@ -264,6 +264,51 @@ class Capturer:
         self.summary.saved.append(self.output_dir / composite_rel)
 
 
+# ---- 기록과 파일 비교 ----
+
+COMPOSITE_LABEL, RAW_LABEL = "합성본", "원본"
+
+
+@dataclass
+class CaptureCheck:
+    """캡처 기록을 실제 파일과 비교한 결과."""
+
+    checked: int = 0
+    missing: list[Any] = field(default_factory=list)              # 두 파일이 다 없는 댓글 (다시 찍는다)
+    partial: list[tuple[int, str]] = field(default_factory=list)  # (증거 번호, 없는 쪽)
+    altered: list[tuple[int, str]] = field(default_factory=list)  # (증거 번호, 해시가 다른 쪽)
+
+
+def check_captures(db: Database, output_dir: Path) -> CaptureCheck:
+    """댓글마다 가장 최근의 성공 기록이 가리키는 합성본과 원본이 있는지, 기록한 해시와 같은지 본다.
+
+    다시 찍으면 같은 이름으로 파일을 새로 쓴다. 그래서 한쪽이라도 남아 있거나 내용이 달라진 캡처는
+    다시 찍을 대상에 넣지 않고 알리기만 한다. 남은 파일이 덮어써지면 되돌릴 수 없다.
+    """
+    check = CaptureCheck()
+    for row in db.latest_captures():
+        check.checked += 1
+        files = (
+            (COMPOSITE_LABEL, row["composite_path"], row["composite_sha256"]),
+            (RAW_LABEL, row["raw_path"], row["raw_sha256"]),
+        )
+        absent = [
+            label for label, rel, _ in files if not rel or not (output_dir / rel).is_file()
+        ]
+        if len(absent) == len(files):
+            check.missing.append(row)
+        elif absent:
+            check.partial.append((row["evidence_no"], ", ".join(absent)))
+        else:
+            changed = [
+                label for label, rel, digest in files
+                if sha256((output_dir / rel).read_bytes()) != digest
+            ]
+            if changed:
+                check.altered.append((row["evidence_no"], ", ".join(changed)))
+    return check
+
+
 # ---- 브라우저 ----
 
 # 강조된 댓글을 찾는다. 답글은 같은 요소가 숨은 채로 하나 더 있어서 화면에 보이는 것만 본다.

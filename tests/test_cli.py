@@ -34,7 +34,7 @@ def test_invalid_video_option_is_reported(write_config, capsys):
 def test_all_design_commands_and_options_parse():
     parser = build_parser()
     for command in ("plan", "run", "collect", "classify", "capture", "export", "status",
-                    "reclassify"):
+                    "reclassify", "folders", "recapture"):
         args = parser.parse_args([
             command, "--limit", "200", "--video", "a", "--video", "b", "--no-search",
             "--search-top", "10", "--max-comments", "500", "--full", "--yes",
@@ -47,6 +47,7 @@ def test_all_design_commands_and_options_parse():
     run = parser.parse_args(["run"])
     assert run.two_pass is False and run.headed is False        # 2단 분류는 기본값이 끔
     assert parser.parse_args(["run", "--two-pass", "--headed"]).two_pass is True
+    assert parser.parse_args(["recapture", "--headed"]).headed is True
     with pytest.raises(SystemExit):
         parser.parse_args(["collect", "--two-pass"])
 
@@ -119,7 +120,13 @@ def test_collect_then_status_and_export(site, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "부정 댓글: 0건" in out and "작성자 랭킹: 0명" in out and "통계 요약: 2개 영상" in out
     book = load_workbook(tmp_path / "output" / "댓글증거.xlsx")
-    assert book.sheetnames == ["부정 댓글", "작성자 랭킹", "통계 요약", "영상 목록"]
+    assert book.sheetnames == ["부정 댓글", "작성자 랭킹", "작성자별 댓글", "통계 요약", "영상 목록"]
+    assert not (tmp_path / "output" / "작성자별").exists()
+
+    # 캡처가 없으면 작성자별 폴더는 만들 것이 없다.
+    assert main(["folders", "--config", site]) == 0
+    assert "복사할 캡처가 없습니다" in capsys.readouterr().out
+    assert not (tmp_path / "output" / "작성자별").exists()
 
     with open(site, "a", encoding="utf-8") as handle:
         handle.write("export:\n  include_all_comments: true\n")
