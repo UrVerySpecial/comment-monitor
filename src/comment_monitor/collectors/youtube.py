@@ -318,9 +318,9 @@ class YouTubeClient:
 
     def comments_by_id(self, comment_ids: Sequence[str]) -> dict[str, dict]:
         """댓글 ID로 직접 조회한다. 돌아오지 않은 ID는 지금 조회할 수 없는 댓글이다."""
+        # id로 조회할 때 maxResults를 함께 보내면 API가 400 unexpectedParameter로 거절한다.
         data = self._call(
-            "comments", part="snippet", id=",".join(comment_ids), textFormat="plainText",
-            maxResults=100,
+            "comments", part="snippet", id=",".join(comment_ids), textFormat="plainText"
         )
         return {item["id"]: item for item in data.get("items", [])}
 

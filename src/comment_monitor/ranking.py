@@ -55,7 +55,17 @@ class AuthorRank:
     first_at: str | None = None
     last_at: str | None = None
     missing: int = 0
+    captured: int = 0                  # 캡처가 있는 댓글 수
     main_target: str = ""
+
+
+def counted(row: Any) -> bool:
+    """랭킹이 세는 댓글인가. 부정이고, 대상이 타인이 아니고, 검토 상태가 제외가 아니어야 한다."""
+    return (
+        row["sentiment"] == NEGATIVE
+        and row["target"] != TARGET_OTHER
+        and row["review_status"] != REVIEW_EXCLUDED
+    )
 
 
 def ranking_buckets(target_names: Sequence[str]) -> list[str]:
@@ -68,9 +78,7 @@ def rank_authors(rows: Iterable[Any], target_names: Sequence[str]) -> list[Autho
     buckets = ranking_buckets(target_names)
     authors: dict[tuple[str, str], AuthorRank] = {}
     for row in rows:
-        if row["sentiment"] != NEGATIVE or row["target"] == TARGET_OTHER:
-            continue
-        if row["review_status"] == REVIEW_EXCLUDED:
+        if not counted(row):
             continue
         key = author_key(row)
         author = authors.get(key)
@@ -86,6 +94,7 @@ def rank_authors(rows: Iterable[Any], target_names: Sequence[str]) -> list[Autho
             author.by_type[row["legal_type"]] = author.by_type.get(row["legal_type"], 0) + 1
         author.videos.add(row["video_id"])
         author.missing += 1 if row["missing"] else 0
+        author.captured += 1 if row["captured"] else 0
         published = row["published_at"]
         if published:
             if author.first_at is None or published < author.first_at:
@@ -108,6 +117,27 @@ def rank_authors(rows: Iterable[Any], target_names: Sequence[str]) -> list[Autho
         # 점수가 가장 높은 대상. 동점이면 칸 순서가 앞선 쪽.
         author.main_target = max(buckets, key=lambda b: (author.by_target.get(b, 0), -buckets.index(b)))
     return ranked
+
+
+def comments_by_rank(
+    rows: Iterable[Any], authors: Iterable[AuthorRank]
+) -> list[tuple[AuthorRank, Any]]:
+    """랭킹이 센 댓글을 (작성자, 댓글)로 늘어놓는다. 순위순, 심각한 댓글부터, 같으면 증거 번호순.
+
+    작성자마다 나오는 건수는 그 작성자의 count와 같다.
+    """
+    by_key = {
+        (a.platform, a.channel_id or "이름:" + (a.name or "")): a for a in authors
+    }
+    listed = []
+    for row in rows:
+        if not counted(row):
+            continue
+        author = by_key.get(author_key(row))
+        if author is not None:
+            listed.append((author, row))
+    listed.sort(key=lambda item: (item[0].rank, -(item[1]["severity"] or 0), item[1]["evidence_no"]))
+    return listed
 
 
 # ---- 통계 요약 ----
@@ -231,5 +261,5 @@ def build_stats(
 __all__ = [
     "LEGAL_TYPES", "SENTIMENTS", "PAST_TARGET", "RANKED_TYPES", "SEVERITIES",
     "AuthorRank", "Stats", "TargetStats", "VideoStats",
-    "build_stats", "rank_authors", "ranking_buckets", "stat_buckets", "target_bucket",
+    "build_stats", "comments_by_rank", "counted", "rank_authors", "ranking_buckets", "stat_buckets", "target_bucket",
 ]

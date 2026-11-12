@@ -1,6 +1,7 @@
 """엑셀 출력.
 
-파일 하나에 탭 셋을 만든다: 부정 댓글, 작성자 랭킹, 통계 요약. 설정에서 켜면 전체 댓글 탭도 붙인다.
+파일 하나에 탭 다섯을 만든다: 부정 댓글, 작성자 랭킹, 작성자별 댓글, 통계 요약, 영상 목록.
+설정에서 켜면 전체 댓글 탭도 붙인다.
 파일은 실행할 때마다 DB 기준으로 통째로 다시 만든다. 사람이 엑셀에 적은 검토 상태와 비고는
 다시 만들기 전에 import_reviews()로 DB에 옮겨 두었다가 새 파일에 다시 채운다.
 
@@ -27,6 +28,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from .. import ranking
 from ..collectors.youtube import PLATFORM, comment_url, video_url
 from ..config import Config
+from ..planner import source_label
+from .author_folders import AUTHORS_DIR, folder_name
 from ..db import (
     COLLECT_FULL,
     COLLECT_PARTIAL,
@@ -43,7 +46,9 @@ MAX_CELL_CHARS = 32_767
 
 NEGATIVE_TITLE = "부정 댓글"
 RANKING_TITLE = "작성자 랭킹"
+AUTHOR_COMMENTS_TITLE = "작성자별 댓글"
 STATS_TITLE = "통계 요약"
+VIDEOS_TITLE = "영상 목록"
 REVIEW_HEADER, NOTE_HEADER = "검토 상태", "비고"
 
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -76,6 +81,15 @@ class Link:
 
     path: str
     label: str = "열기"
+
+
+@dataclass(frozen=True)
+class Jump:
+    """같은 파일의 다른 탭으로 가는 링크 칸."""
+
+    sheet: str
+    row: int
+    label: str = "보기"
 
 
 @dataclass(frozen=True)
@@ -156,6 +170,7 @@ COMMENT_COLUMNS: tuple[Column, ...] = (
     Column("수정 여부", "시각", 16, _edited),
     Column("조회 불가 감지일시 (KST)", "시각", 20, _kst("missing_at")),
     Column("댓글 주소", "위치", 40, lambda row: comment_url(row["video_id"], row["comment_id"])),
+    Column("영상 ID", "위치", 14, _field("video_id")),  # 영상 목록 탭과 잇는 키
     Column("영상 제목", "위치", 40, _field("video_title")),
     Column("영상 주소", "위치", 40, lambda row: video_url(row["video_id"])),
     Column("영상 채널명", "위치", 20, _field("video_channel")),
@@ -213,8 +228,24 @@ def ranking_sheet(target_names: Sequence[str], *, with_past: bool) -> SheetSpec:
             return f"{bucket} 점수 ※재분류 필요"
         return f"{bucket} 점수"
 
+    # 작성자별 댓글 탭에서 그 작성자의 댓글이 시작하는 행. 그 탭은 순위순이고 작성자마다 count건이다.
+    starts: dict[int, int] = {}
+
+    def rows(db: Database) -> list[ranking.AuthorRank]:
+        authors = ranking.rank_authors(db.judged_rows(), target_names)
+        row = 2
+        for author in authors:
+            starts[author.rank] = row
+            row += author.count
+        return authors
+
+    def folder_link(author: ranking.AuthorRank) -> Link | None:
+        return Link(f"{AUTHORS_DIR}/{folder_name(author)}") if author.captured else None
+
     columns = (
         Column("순위", "식별", 7, _attr("rank")),
+        Column("댓글 보기", "증거", 9, lambda a: Jump(AUTHOR_COMMENTS_TITLE, starts[a.rank])),
+        Column("증거 폴더", "증거", 9, folder_link),
         Column("작성자명", "작성자", 22, _attr("name")),
         Column("작성자 채널 ID", "작성자", 28, _attr("channel_id")),
         Column("프로필 주소", "작성자", 40, _attr("profile_url")),
@@ -240,12 +271,64 @@ def ranking_sheet(target_names: Sequence[str], *, with_past: bool) -> SheetSpec:
     return SheetSpec(
         title=RANKING_TITLE,
         columns=columns,
-        rows=lambda db: ranking.rank_authors(db.judged_rows(), target_names),
+        rows=rows,
         unit="명",
     )
 
 
+def author_comments_sheet(target_names: Sequence[str]) -> SheetSpec:
+    """작성자별 댓글 탭. 랭킹이 센 댓글을 순위순으로 늘어놓아 한 작성자의 댓글을 이어서 본다.
+
+    검토 상태와 비고는 부정 댓글 탭에서만 읽어 오므로 여기에는 그 칸을 두지 않는다.
+    """
+
+    def rows(db: Database) -> list[tuple[ranking.AuthorRank, Any]]:
+        authors = ranking.rank_authors(db.judged_rows(), target_names)
+        return ranking.comments_by_rank(db.export_rows(only_negative=True), authors)
+
+    return SheetSpec(
+        title=AUTHOR_COMMENTS_TITLE,
+        columns=(
+            Column("순위", "식별", 7, lambda item: item[0].rank),
+            *(
+                Column(c.header, c.group, c.width, lambda item, c=c: c.value(item[1]))
+                for c in (*COMMENT_COLUMNS, *EVIDENCE_COLUMNS)
+            ),
+        ),
+        rows=rows,
+    )
+
+
 _COLLECT_LABELS = {COLLECT_FULL: "전체", COLLECT_PARTIAL: "부분"}
+
+
+def _found_by(row: Any) -> str:
+    label = source_label(row["source"])
+    return f"{label}: {row['source_detail']}" if row["source_detail"] else label
+
+
+# 댓글 탭의 "영상 ID"로 찾아볼 수 있는 영상 목록. 댓글을 한 건이라도 모은 영상만 올린다.
+VIDEO_LIST = SheetSpec(
+    title=VIDEOS_TITLE,
+    columns=(
+        Column("영상 ID", "식별", 14, _field("video_id")),
+        Column("영상 주소", "위치", 44, lambda row: video_url(row["video_id"])),
+        Column("영상 제목", "위치", 50, _field("title")),
+        Column("영상 채널명", "위치", 22, _field("channel_title")),
+        Column("전체 댓글 수", "건수", 11, _field("comment_count")),
+        Column("수집된 댓글 수", "건수", 11, _field("collected")),
+        # 긍정과 부정은 수집해서 분류까지 마친 댓글만 센 값이다. 영상 전체의 수가 아니다.
+        Column("긍정 댓글 수", "건수", 11, _field("positives")),
+        Column("부정 댓글 수", "건수", 11, _field("negatives")),
+        Column("수집 상태", "건수", 10,
+               lambda row: _COLLECT_LABELS.get(row["collect_status"], "미수집")),
+        Column("발견 경로", "위치", 24, _found_by),
+        Column("게시일시 (KST)", "시각", 20, _kst("published_at")),
+        Column("최근 수집일시 (KST)", "시각", 20, _kst("last_collected_at")),
+    ),
+    rows=lambda db: db.video_rows(),
+    unit="개 영상",
+)
 
 
 @dataclass(frozen=True)
@@ -338,7 +421,8 @@ def build_sheets(config: Config, db: Database) -> tuple[SheetSpec | GridSpec, ..
         tuple(config.target_values),
     ))
     sheets: list[SheetSpec | GridSpec] = [
-        NEGATIVE_COMMENTS, ranking_sheet(names, with_past=with_past), stats_sheet(names),
+        NEGATIVE_COMMENTS, ranking_sheet(names, with_past=with_past),
+        author_comments_sheet(names), stats_sheet(names), VIDEO_LIST,
     ]
     if config.export.include_all_comments:
         sheets.append(ALL_COMMENTS)
@@ -398,6 +482,10 @@ def _cell(sheet, value: Any) -> Any:
     if isinstance(value, Link):
         target = value.path.replace("\\", "/").replace('"', '""')
         return WriteOnlyCell(sheet, value=f'=HYPERLINK("{target}","{value.label}")')
+    if isinstance(value, Jump):
+        return WriteOnlyCell(
+            sheet, value=f"=HYPERLINK(\"#'{value.sheet}'!A{value.row}\",\"{value.label}\")"
+        )
     if isinstance(value, Percent):
         cell = WriteOnlyCell(sheet, value=value.value)
         cell.number_format = "0.0%"

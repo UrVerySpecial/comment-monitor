@@ -222,9 +222,9 @@ def test_videos_with_comments_turned_off_are_skipped_and_recorded(cfg, store, fa
     assert store.get_video("youtube", V3)["skip_reason"] == "댓글 사용 중지"
 
 
-def test_video_limit_defers_the_rest_to_the_next_run(cfg, store, fake):
-    for day, video_id in enumerate((V1, V2, V3), start=1):
-        fake.add_video(video_id, comments=2, published=f"2026-10-0{day}T00:00:00Z")
+def test_video_limit_keeps_the_most_commented_videos(cfg, store, fake):
+    for video_id, comments in ((V1, 1), (V2, 5), (V3, 3)):
+        fake.add_video(video_id, comments=comments)
     config = cfg(f"""
     youtube:
       videos: ["{V1}", "{V2}", "{V3}"]
@@ -232,14 +232,14 @@ def test_video_limit_defers_the_rest_to_the_next_run(cfg, store, fake):
       max_videos_per_run: 2
     """)
     plan, summary = collect(config, store, fake)
-    assert [video.info.video_id for video in plan.videos] == [V3, V2]   # 최신 영상부터
+    assert [video.info.video_id for video in plan.videos] == [V2, V3]   # 댓글 많은 순
     assert [video.info.video_id for video in plan.deferred] == [V1]
     assert len(summary.results) == 2
     assert store.get_video("youtube", V1)["collect_status"] == dbm.COLLECT_NONE
 
-    plan, _ = collect(config, store, fake)
-    assert plan.videos[0].info.video_id == V1                           # 밀린 영상이 먼저
-    assert store.count_comments("youtube", V1) == 2
+    plan, _ = collect(config, store, fake)                              # 순위가 그대로면 대상도 그대로
+    assert [video.info.video_id for video in plan.videos] == [V2, V3]
+    assert store.count_comments("youtube", V1) == 0
 
 
 def test_quota_stop_reports_videos_not_reached(cfg, store, fake):

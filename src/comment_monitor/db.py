@@ -602,6 +602,32 @@ class Database:
             params.append(limit)
         return self.conn.execute(sql, params).fetchall()
 
+    def latest_captures(self) -> list[sqlite3.Row]:
+        """댓글마다 가장 최근의 성공한 캡처 기록. 파일과 비교하고, 파일이 없으면 다시 찍는 데 쓴다.
+
+        지금의 캡처 대상 조건과 무관하게 찍은 적이 있는 댓글 전부다. 판정이 바뀌어 유효한 최종 판정이
+        없으면 심각도와 대상은 비어 있다. 심각도가 높은 것부터 준다.
+        """
+        return self.conn.execute(
+            f"""
+            SELECT c.evidence_no, c.platform, c.comment_id, c.video_id, c.parent_id, c.text,
+                   c.author_name, c.author_channel_id, c.published_at,
+                   v.title AS video_title, v.channel_title AS video_channel,
+                   k.severity, k.target,
+                   p.composite_path, p.composite_sha256, p.raw_path, p.raw_sha256, p.captured_at
+            FROM captures p
+            JOIN comments c ON c.platform = p.platform AND c.comment_id = p.comment_id
+            JOIN videos v ON v.platform = c.platform AND v.video_id = c.video_id
+            LEFT JOIN classifications k ON k.platform = c.platform
+                AND k.comment_id = c.comment_id AND k.is_current = 1
+                AND k.stage = '{STAGE_FINAL}' AND k.status = '{STATUS_OK}'
+            WHERE p.id = (
+                SELECT MAX(x.id) FROM captures x WHERE x.platform = p.platform
+                    AND x.comment_id = p.comment_id AND x.status = '{STATUS_OK}')
+            ORDER BY COALESCE(k.severity, 0) DESC, c.evidence_no
+            """
+        ).fetchall()
+
     def save_capture(
         self,
         platform: str,
@@ -689,6 +715,24 @@ class Database:
 
     def all_videos(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM videos ORDER BY first_seen_at, video_id").fetchall()
+
+    def video_rows(self) -> list[sqlite3.Row]:
+        """엑셀 영상 목록용. 댓글을 모은 영상마다 수집된 댓글 수와 긍정·부정 댓글 수를 붙여 댓글 많은 순으로 준다."""
+        return self.conn.execute(
+            f"""
+            SELECT v.*, COUNT(c.comment_id) AS collected,
+                   COALESCE(SUM(k.sentiment = '긍정'), 0) AS positives,
+                   COALESCE(SUM(k.sentiment = '부정'), 0) AS negatives
+            FROM videos v
+            LEFT JOIN comments c ON c.platform = v.platform AND c.video_id = v.video_id
+            LEFT JOIN classifications k ON k.platform = c.platform
+                AND k.comment_id = c.comment_id AND k.is_current = 1
+                AND k.stage = '{STAGE_FINAL}' AND k.status = '{STATUS_OK}'
+            GROUP BY v.platform, v.video_id
+            HAVING collected > 0 OR v.collect_status != '{COLLECT_NONE}'
+            ORDER BY COALESCE(v.comment_count, 0) DESC, collected DESC, v.video_id
+            """
+        ).fetchall()
 
     # ---- 분류 ----
 

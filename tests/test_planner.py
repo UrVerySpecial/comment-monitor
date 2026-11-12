@@ -110,6 +110,16 @@ def test_channel_videos_come_after_direct_ones(cfg, store, fake):
     assert any(unknown in note for note in plan.notes)
 
 
+def test_comment_count_outranks_the_source_priority(cfg, store, fake, searchable):
+    fake.counts[searchable[0]] = 900
+    config = apply_overrides(cfg(SEARCH), max_videos=1)
+    plan = plan_for(config, store, fake)
+    assert [(v.info.video_id, v.source) for v in plan.videos] == [
+        (searchable[0], dbm.SOURCE_SEARCH)
+    ]
+    assert V1 in ids_of(plan.deferred)
+
+
 @pytest.mark.parametrize(
     "state, count, options, mode, label",
     [

@@ -77,7 +77,7 @@ class Estimate:
 @dataclass
 class Plan:
     videos: list[PlannedVideo] = field(default_factory=list)      # 이번에 처리할 영상
-    deferred: list[PlannedVideo] = field(default_factory=list)    # 실행당 영상 수 상한에 걸림
+    deferred: list[PlannedVideo] = field(default_factory=list)    # 댓글 수 순위가 영상 수 상한 밖
     disabled: list[VideoInfo] = field(default_factory=list)       # 댓글이 막힌 영상
     excluded: list[str] = field(default_factory=list)             # 제외 목록에 있는 영상 ID
     unavailable: list[str] = field(default_factory=list)          # 조회되지 않는 영상 ID
@@ -330,14 +330,10 @@ def build_plan(
             )
         )
 
-    # 우선순위: 지정, 채널, 검색 순. 같은 순위 안에서는 아직 수집하지 않은 영상을 최신순으로 먼저,
-    # 그다음 수집한 지 가장 오래된 영상부터. 상한에 밀린 영상이 다음 실행에서 앞으로 온다.
-    def last_collected(video: PlannedVideo) -> str:
-        row = rows.get(video.info.video_id)
-        return (row["last_collected_at"] if row is not None else None) or ""
-
+    # 댓글이 많은 영상부터 상한까지만 대상으로 삼는다. 댓글 수가 같으면 지정, 채널, 검색 순,
+    # 그 안에서는 최신 영상부터. 상한 밖의 영상은 순위가 바뀌기 전에는 계속 대상에서 빠진다.
     candidates.sort(key=lambda video: video.info.published_at, reverse=True)
-    candidates.sort(key=lambda video: (_PRIORITY[video.source], last_collected(video)))
+    candidates.sort(key=lambda video: (-(video.info.comment_count or 0), _PRIORITY[video.source]))
 
     limit_videos = config.limits.max_videos_per_run
     plan.videos, plan.deferred = candidates[:limit_videos], candidates[limit_videos:]

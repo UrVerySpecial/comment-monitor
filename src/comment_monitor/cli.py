@@ -14,7 +14,15 @@ from collections.abc import Sequence
 
 from . import __version__
 from . import classifier as classifier_module
-from .capture import CAPTURE_DIR, Camera, CaptureError, Capturer, CaptureSummary, YouTubeCamera
+from .capture import (
+    CAPTURE_DIR,
+    Camera,
+    CaptureError,
+    Capturer,
+    CaptureSummary,
+    YouTubeCamera,
+    check_captures,
+)
 from .classifier import Classifier, ClassifierError, ClassifySummary, TwoPassClassifier
 from .collectors.base import (
     CAPPED,
@@ -40,6 +48,7 @@ from .config import (
 )
 from .db import Database, DatabaseError, to_kst
 from .exporters.compare import compare_path, export_comparison
+from .exporters.author_folders import AUTHORS_DIR, export_author_folders
 from .exporters.excel import ExportError, build_sheets, export_excel, import_reviews
 from .planner import (
     Plan,
@@ -60,6 +69,8 @@ _COMMANDS = {
     "export": "DB 기준으로 엑셀 파일을 다시 만든다",
     "status": "DB 현황, 오늘 할당량 사용량, 미분류와 미캡처 건수를 보여준다",
     "reclassify": "분류 기준을 바꾼 뒤 다시 분류한다. 이전 판정은 이력으로 남는다",
+    "recapture": "캡처 기록을 실제 파일과 비교하고, 파일이 없는 캡처를 다시 찍는다",
+    "folders": "랭킹 작성자별 폴더에 캡처를 복사해 모은다. 폴더는 매번 지우고 다시 만든다",
 }
 
 # 확인 질문에 아니오라고 답한 단계의 반환값. 밖으로는 종료 코드 0으로 나간다.
@@ -98,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--max-comments", type=_positive_int, metavar="N", help="영상당 댓글 상한"
     )
+    common.add_argument(
+        "--max-videos", type=_positive_int, metavar="N",
+        help="대상 영상 수 상한. 댓글이 많은 영상부터 N개만 처리 (기본값: 설정의 "
+             "limits.max_videos_per_run, 50)",
+    )
     scan = common.add_mutually_exclusive_group()
     scan.add_argument("--full", action="store_true", help="큰 영상도 전체 재확인")
     scan.add_argument("--quick", action="store_true", help="모든 영상을 새 댓글만 확인")
@@ -116,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
                 help="최신 댓글 N건을 model과 first_pass_model로 각각 분류해 갈린 판정을 "
                      "엑셀로 내보낸다 (판정은 저장하지 않는다)",
             )
-        if name in ("run", "capture"):
+        if name in ("run", "capture", "recapture"):
             sub.add_argument(
                 "--headed", action="store_true",
                 help="브라우저 창을 띄워 캡처 과정을 보여준다 (capture.headless 설정과 무관하게)",
@@ -234,8 +250,8 @@ def _print_plan(plan: Plan, config: Config, *, two_pass: bool = False) -> None:
         )
     if plan.deferred:
         leftovers.append(
-            f"실행당 영상 수 상한({limits.max_videos_per_run}개)으로 다음 실행에 넘기는 영상: "
-            f"{len(plan.deferred)}개"
+            f"영상 수 상한({limits.max_videos_per_run}개, 댓글 많은 순)에 들지 못해 빠지는 영상: "
+            f"{len(plan.deferred)}개 (--max-videos로 늘릴 수 있습니다)"
         )
     if estimate.over_cap_comments:
         leftovers.append(
@@ -305,7 +321,10 @@ def _print_summary(summary: CollectionSummary, plan: Plan, quota_used: int) -> N
         print(f"수집을 멈췄습니다: {summary.stopped_reason}")
         print(f"- 처리하지 못한 영상 {len(summary.not_reached)}개는 다음 실행이 이어서 합니다.")
     if plan.deferred:
-        print(f"- 영상 수 상한으로 넘긴 영상 {len(plan.deferred)}개는 다음 실행에서 먼저 처리합니다.")
+        print(
+            f"- 댓글 수 순위가 영상 수 상한 밖인 영상 {len(plan.deferred)}개는 처리하지 않았습니다. "
+            "--max-videos로 상한을 늘릴 수 있습니다."
+        )
 
 
 def _collect(config: Config, db: Database, args: argparse.Namespace, *, plan_only: bool) -> int:
@@ -669,12 +688,36 @@ def _capture(config: Config, db: Database, args: argparse.Namespace) -> int:
     )
     print(f"브라우저: {'창 없이 실행' if headless else '창을 띄워 실행'} · 저장 위치: {folder}")
 
-    limits_hit = []
-    if count < pending:
-        limits_hit.append(
-            "limit" if args.limit and args.limit <= limits.max_captures_per_run
-            else "max_captures_per_run"
-        )
+    summary, code = _shoot(
+        config, db, args, db.comments_to_capture(**scope, limit=count),
+        headless=headless, limits_hit=_capture_limits_hit(config, args, count, pending),
+    )
+
+    left = db.count_to_capture(**scope)
+    print(f"캡처 완료: {summary.captured:,}건 · 실패 {summary.failed:,}건 · 남은 미캡처 {left:,}건")
+    for evidence_no, reason in summary.failures:
+        print(f"- 증거 {evidence_no:06d}: {reason}")
+    if summary.failed:
+        print("실패한 댓글은 다음 실행에서 다시 시도합니다.")
+    if summary.captured:
+        print("엑셀의 캡처 칸은 `export`를 다시 실행하면 채워집니다.")
+    return code
+
+
+def _capture_limits_hit(
+    config: Config, args: argparse.Namespace, count: int, pending: int
+) -> list[str]:
+    if count >= pending:
+        return []
+    limit = config.limits.max_captures_per_run
+    return ["limit" if args.limit and args.limit <= limit else "max_captures_per_run"]
+
+
+def _shoot(
+    config: Config, db: Database, args: argparse.Namespace, rows: Sequence[Any],
+    *, headless: bool, limits_hit: list[str],
+) -> tuple[CaptureSummary, int]:
+    """댓글들을 브라우저로 찍고 실행 기록을 남긴다. (결과, 종료 코드)를 돌려준다."""
     run_id = db.start_run(args.command, {"limit": args.limit, "headed": args.headed})
     summary = CaptureSummary()
     error = None
@@ -682,9 +725,10 @@ def _capture(config: Config, db: Database, args: argparse.Namespace) -> int:
 
     def progress(s: CaptureSummary, row, failure: str | None) -> None:
         result = f"실패: {failure}" if failure else "저장"
+        # 찍은 뒤에 판정이 바뀐 댓글은 심각도가 없다.
+        severity = f"심각도 {row['severity']} · " if row["severity"] is not None else ""
         print(
-            f"[{s.done:,}/{s.total:,}] 증거 {row['evidence_no']:06d} · "
-            f"심각도 {row['severity']} · {result}",
+            f"[{s.done:,}/{s.total:,}] 증거 {row['evidence_no']:06d} · {severity}{result}",
             flush=True,
         )
 
@@ -692,7 +736,7 @@ def _capture(config: Config, db: Database, args: argparse.Namespace) -> int:
         with make_camera(headless=headless) as camera:
             worker = Capturer(config, db, camera, run_id=run_id)
             summary = worker.summary
-            worker.run(db.comments_to_capture(**scope, limit=count), on_progress=progress)
+            worker.run(rows, on_progress=progress)
     except CaptureError as exc:
         error, code = str(exc), 1
         print(f"오류: {exc}", file=sys.stderr)
@@ -711,15 +755,55 @@ def _capture(config: Config, db: Database, args: argparse.Namespace) -> int:
         counts={"captured": summary.captured, "failed": summary.failed},
         limits_hit=limits_hit, error=error,
     )
+    return summary, code
 
-    left = db.count_to_capture(**scope)
-    print(f"캡처 완료: {summary.captured:,}건 · 실패 {summary.failed:,}건 · 남은 미캡처 {left:,}건")
+
+def _recapture(config: Config, db: Database, args: argparse.Namespace) -> int:
+    """캡처 기록을 파일과 비교하고, 합성본과 원본이 다 없는 캡처를 다시 찍는다.
+
+    기록은 지우지 않는다. 새 기록이 덧붙고, 엑셀은 댓글마다 가장 최근의 성공 기록을 쓴다.
+    """
+    output_dir = config.export.path.parent
+    check = check_captures(db, output_dir)
+    print(f"캡처 기록 {check.checked:,}건을 파일과 비교했습니다. ({output_dir / CAPTURE_DIR})")
+    if not (check.missing or check.partial or check.altered):
+        print("파일이 모두 기록과 일치합니다.")
+        return 0
+    if check.missing:
+        print(f"파일이 없는 캡처: {len(check.missing):,}건")
+    if check.partial:
+        print(f"한쪽 파일만 남은 캡처: {len(check.partial):,}건 (남은 파일을 덮어쓰지 않도록 다시 찍지 않습니다)")
+        for evidence_no, absent in check.partial:
+            print(f"- 증거 {evidence_no:06d}: {absent} 없음")
+    if check.altered:
+        print(f"기록한 해시와 다른 캡처: {len(check.altered):,}건 (파일이 바뀌었습니다. 다시 찍지 않습니다)")
+        for evidence_no, changed in check.altered:
+            print(f"- 증거 {evidence_no:06d}: {changed}")
+    if not check.missing:
+        print("다시 찍을 댓글이 없습니다.")
+        return 0
+
+    pending = len(check.missing)
+    count = min(pending, config.limits.max_captures_per_run, args.limit or pending)
+    headless = config.capture.headless and not args.headed
+    print(f"다시 찍을 댓글: {pending:,}건 중 {count:,}건 (심각도가 높은 댓글부터)")
+    print(f"브라우저: {'창 없이 실행' if headless else '창을 띄워 실행'}")
+    summary, code = _shoot(
+        config, db, args, check.missing[:count],
+        headless=headless, limits_hit=_capture_limits_hit(config, args, count, pending),
+    )
+
+    left = len(check_captures(db, output_dir).missing)
+    print(
+        f"다시 캡처 완료: {summary.captured:,}건 · 실패 {summary.failed:,}건 · "
+        f"아직 파일이 없는 캡처 {left:,}건"
+    )
     for evidence_no, reason in summary.failures:
         print(f"- 증거 {evidence_no:06d}: {reason}")
     if summary.failed:
-        print("실패한 댓글은 다음 실행에서 다시 시도합니다.")
+        print("댓글이 지워졌거나 고쳐졌으면 다시 찍을 수 없습니다. 예전 기록은 DB에 그대로 남아 있습니다.")
     if summary.captured:
-        print("엑셀의 캡처 칸은 `export`를 다시 실행하면 채워집니다.")
+        print("엑셀의 캡처 해시는 `export`를 다시 실행하면 새 파일 기준으로 바뀝니다.")
     return code
 
 
@@ -751,6 +835,28 @@ def _export(config: Config, db: Database) -> int:
     for title, rows in result.rows.items():
         print(f"{title}: {rows:,}{result.units.get(title, '건')}")
     print(f"저장: {result.path}")
+    return 0
+
+
+def _folders(config: Config, db: Database) -> int:
+    """랭킹 탭의 "증거 폴더" 칸이 가리키는 폴더를 만든다. DB는 읽기만 하고 엑셀은 건드리지 않는다."""
+    try:
+        folders = export_author_folders(db, config.export.path.parent, config.target_names)
+    except OSError as exc:
+        print(
+            f"오류: {AUTHORS_DIR} 폴더를 다시 만들지 못했습니다 ({exc}). 폴더 안의 파일을 "
+            "닫은 뒤 다시 실행해 주세요. 원본 캡처와 엑셀은 그대로입니다.",
+            file=sys.stderr,
+        )
+        return 1
+    if folders.folders:
+        print(f"작성자별 증거 폴더: {folders.folders:,}명 · 캡처 {folders.files:,}장")
+        print(f"저장: {folders.path}")
+        print("폴더 이름의 순위는 지금 DB 기준입니다. 엑셀의 순위와 맞추려면 `export`도 실행해 주세요.")
+    else:
+        print("복사할 캡처가 없습니다.")
+    if folders.missing:
+        print(f"- 캡처 파일을 찾지 못해 복사하지 못한 댓글 {folders.missing:,}건")
     return 0
 
 
@@ -924,6 +1030,10 @@ def _dispatch(config: Config, db: Database, args: argparse.Namespace) -> int:
         return _classify(config, db, args, again=command == "reclassify")
     if command == "capture":
         return _capture(config, db, args)
+    if command == "recapture":
+        return _recapture(config, db, args)
+    if command == "folders":
+        return _folders(config, db)
     return _export(config, db)
 
 
@@ -941,6 +1051,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             no_search=args.no_search,
             search_top=args.search_top,
             max_comments=args.max_comments,
+            max_videos=args.max_videos,
         )
         with Database(config.db_path) as db:
             code = _dispatch(config, db, args)
